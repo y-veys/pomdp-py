@@ -21,6 +21,7 @@ from pomdp_py.utils.interfaces.solvers import vi_pruning, sarsop
 
 # Algorithms
 from pomdp_py.algorithms.value_iteration import ValueIteration  # Cython compiled
+from pomdp_py.algorithms.mdp_value_iteration import MDPValueIteration  # Cython compiled
 from pomdp_py.algorithms.value_function import value, qvalue, belief_update
 from pomdp_py.algorithms.pomcp import POMCP
 from pomdp_py.algorithms.po_rollout import PORollout
