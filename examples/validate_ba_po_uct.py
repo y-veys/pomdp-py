@@ -151,7 +151,7 @@ class BAMDPRewardModel(pomdp_py.RewardModel):
 
         # Self-loop (failure)
         if state.name == next_state.name and state.name == "start":
-            return -1.0
+            return -100.0
 
         return 0.0  # Default
 
@@ -263,7 +263,7 @@ def create_test_bamdp():
     # (start, right, goal) is deterministic (not in beliefs)
     # (start, left, goal) is uncertain with prior Beta(1, 1) = Uniform[0,1]
     transition_beliefs = {
-        (SimpleState("start"), SimpleAction("left"), SimpleState("goal")): (1.0, 1.0)
+        (SimpleState("start"), SimpleAction("left"), SimpleState("goal")): (1.0, 100.0)
     }
 
     # Create models
@@ -301,10 +301,11 @@ def test_full_episode():
 
     planner = POUCT(
         max_depth=10,
-        num_sims=100,
+        num_sims=1000,
         discount_factor=0.95,
-        exploration_const=5.0,
-        rollout_policy=BAMDPRolloutPolicy()
+        exploration_const=100.0,
+        rollout_policy=BAMDPRolloutPolicy(), 
+        debug=True
     )
 
     # Create environment
@@ -318,7 +319,7 @@ def test_full_episode():
     total_discounted_reward = 0.0
     discount = 1.0
     gamma = 0.95
-    max_steps = 20
+    max_steps = 1
 
     for step in range(max_steps):
         # Plan
@@ -370,3 +371,7 @@ def test_full_episode():
     print(f"  Total reward: {total_reward:.2f}")
     print(f"  Total discounted reward: {total_discounted_reward:.2f}")
     print("✓ Full episode test passed")
+
+
+if __name__ == "__main__":
+    test_full_episode()

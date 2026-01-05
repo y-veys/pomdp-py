@@ -31,6 +31,7 @@ cdef class POUCT(Planner):
     cdef float _last_planning_time
     cdef bint _show_progress
     cdef int _pbar_update_interval
+    cdef bint _debug
 
     cpdef _search(self)
     cdef _initialize_progress_bar(self)

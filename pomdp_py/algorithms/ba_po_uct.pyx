@@ -208,7 +208,7 @@ cdef class POUCT(Planner):
                  discount_factor=0.9, exploration_const=math.sqrt(2),
                  num_visits_init=0, value_init=0,
                  rollout_policy=None,
-                 action_prior=None, heuristic_fn=None, show_progress=False, pbar_update_interval=5):
+                 action_prior=None, heuristic_fn=None, show_progress=False, pbar_update_interval=5, debug=False):
         self._max_depth = max_depth
         self._planning_time = planning_time
         self._num_sims = num_sims
@@ -229,6 +229,8 @@ cdef class POUCT(Planner):
         self._agent = None
         self._last_num_sims = -1
         self._last_planning_time = -1
+
+        self._debug = debug
 
     @property
     def updates_agent_belief(self):
@@ -350,13 +352,22 @@ cdef class POUCT(Planner):
         pbar = self._initialize_progress_bar()
         start_time = time.time()
 
-        # For our Bayes-Adaptive MDP, we assume that the robot's state is known. 
+        # For our Bayes-Adaptive MDP, we assume that the robot's state is known.
         # So, even though we are sampling from a distribution, the distribution
         # should be degenerate. We can sample once outside of the loop.
         state = self._agent.sample_belief()
 
+        if self._debug: 
+            print(f"\n{'='*70}")
+            print(f"Starting MCTS search from state: {state}")
+            print(f"{'='*70}")
+
         while not self._should_stop(sims_count, start_time):
+            if self._debug:
+                print(f"\n--- Simulation {sims_count + 1} ---")
             transition_beliefs = copy.deepcopy(self._agent.transition_beliefs())
+            if self._debug:
+                print(f"Initial beliefs: {transition_beliefs}")
             self._perform_simulation(state, transition_beliefs)
             sims_count += 1
             self._update_progress(pbar, sims_count, start_time)
@@ -364,6 +375,13 @@ cdef class POUCT(Planner):
         self._finalize_progress_bar(pbar)
         best_action = self._agent.tree.argmax()
         time_taken = time.time() - start_time
+
+        if self._debug:
+            print(f"\n{'='*70}")
+            print(f"Search complete: {sims_count} simulations")
+            print(f"Selected action: {best_action}")
+            print(f"{'='*70}\n")
+
         return best_action, time_taken, sims_count
 
     cdef _initialize_progress_bar(self):
@@ -396,6 +414,10 @@ cdef class POUCT(Planner):
         if depth > self._max_depth:
             return 0
         if root is None:
+            if self._debug: 
+                print(f"  [Depth {depth}] New node at state={state}, expanding...")
+                print(f"  [Depth {depth}] Transition beliefs at expansion: {transition_beliefs}")
+
             if self._agent.tree is None:
                 root = self._VNode(root=True)
                 self._agent.tree = root
@@ -406,14 +428,35 @@ cdef class POUCT(Planner):
             if parent is not None:
                 parent[observation] = root
             self._expand_vnode(root, history, state=state)
+            
+            if self._debug:
+                print(f"  [Depth {depth}] Starting rollout from {state}")
+
             rollout_reward = self._rollout(state, history, root, depth, transition_beliefs)
+
+            if self._debug:
+                print(f"  [Depth {depth}] Rollout returned reward: {rollout_reward:.2f}")
             return rollout_reward
         cdef int nsteps
         action = self._ucb(root)
+        if self._debug:
+            print(f"  [Depth {depth}] At {state}, UCB selected action={action}")
+            print(f"  [Depth {depth}] Current Q-values: ", end="")
+            for a in root.children:
+                print(f"{a}={root[a].value:.2f}(n={root[a].num_visits}) ", end="")
+            print()
+
         next_state, observation, success, reward, nsteps = self._sample_ba_transition(state, action, transition_beliefs)
+        if self._debug:
+            print(f"  [Depth {depth}] Transition: {state} --{action}--> {next_state} ({'success' if success else 'failure'}, r={reward:.1f})")
 
         target_state = self._agent.transition_model.sample(state=state, action=action)
         transition_beliefs = self._update_beliefs(transition_beliefs, state, action, target_state, success)
+
+        if (state, action, target_state) in transition_beliefs:
+            alpha, beta = transition_beliefs[(state, action, target_state)]
+            if self._debug:
+                print(f"  [Depth {depth}] Updated belief: ({state}, {action}, {target_state}) -> Beta({alpha:.1f}, {beta:.1f})")
         if nsteps == 0:
             # This indicates the provided action didn't lead to transition
             # Perhaps the action is not allowed to be performed for the given state
@@ -430,7 +473,10 @@ cdef class POUCT(Planner):
                                                                                transition_beliefs)
         root.num_visits += 1
         root[action].num_visits += 1
+        old_value = root[action].value
         root[action].value = root[action].value + (total_reward - root[action].value) / (root[action].num_visits)
+        if self._debug:
+            print(f"  [Depth {depth}] Backprop: Q({action}) = {old_value:.2f} -> {root[action].value:.2f} (n={root[action].num_visits}, R={total_reward:.2f})")
         return total_reward
 
     cpdef _rollout(self, State state, tuple history, VNode root, int depth, dict transition_beliefs):
