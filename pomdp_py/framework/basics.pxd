@@ -39,6 +39,13 @@ cdef class Agent:
     cdef dict __dict__
     cdef str _name
 
+cdef class BayesAdaptiveAgent(Agent):
+    cdef dict _transition_beliefs
+
+    cpdef set_transition_beliefs(self, dict transition_beliefs)
+    cpdef update_transition_beliefs(self, State state, Action action,
+                                    State target_state, bint success)
+
 cdef class Environment:
     cdef State _init_state
     cdef TransitionModel _transition_model

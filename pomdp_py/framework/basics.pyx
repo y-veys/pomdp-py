@@ -479,6 +479,88 @@ cdef class Agent:
         return self.policy_model.get_all_actions(state=state, history=history)
 
 
+cdef class BayesAdaptiveAgent(Agent):
+    """
+    A Bayes-Adaptive Agent that extends the standard Agent class
+    with beliefs over transition probabilities.
+
+    For constrained BAMDPs, beliefs are represented as Beta distributions
+    over success probabilities: {(state, action, target_state) -> (alpha, beta)}
+
+    __init__(self, init_belief, beliefs,
+             policy_model=None,
+             transition_model=None,
+             observation_model=None,
+             reward_model=None,
+             blackbox_model=None,
+             name=None)
+
+    Args:
+        init_belief: Initial belief distribution over states
+        beliefs (dict): Beta beliefs over transitions {(s,a,s') -> (alpha, beta)}
+        Other args: Same as Agent class
+    """
+
+    def __init__(self, init_belief, transition_beliefs,
+                 policy_model=None,
+                 transition_model=None,
+                 observation_model=None,
+                 reward_model=None,
+                 blackbox_model=None,
+                 name=None,):
+        # Call parent constructor
+        Agent.__init__(self, init_belief, policy_model,
+                       transition_model, observation_model,
+                       reward_model, blackbox_model, name)
+
+        # Add Bayes-Adaptive specific attribute
+        self._transition_beliefs = transition_beliefs
+
+    @property
+    def transition_beliefs(self):
+        """
+        transition_beliefs(self)
+        Current Beta beliefs over transition probabilities.
+
+        Returns:
+            dict: {(state, action, target_state) -> (alpha, beta)}
+        """
+        return self._transition_beliefs
+
+    cpdef set_transition_beliefs(self, dict transition_beliefs):
+        """
+        set_transition_beliefs(self, dict beliefs)
+        Update the transition_beliefs dictionary.
+
+        Args:
+            transition_beliefs (dict): New beliefs {(s,a,s') -> (alpha, beta)}
+        """
+        self._transition_beliefs = transition_beliefs
+
+    cpdef update_transition_beliefs(self, State state, Action action,
+                                       State target_state, bint success):
+        """
+        update_transition_beliefs(self, state, action, target_state, success)
+        Perform Bayesian update on a single transition belief.
+
+        Beta posterior update:
+        - If success: (α, β) → (α+1, β)
+        - If failure: (α, β) → (α, β+1)
+
+        Args:
+            state: State we transitioned from
+            action: Action that was taken
+            target_state: Target state for this action
+            success (bool): Whether transition succeeded
+        """
+        if (state, action, target_state) in self._transition_beliefs:
+            alpha, beta = self._transition_beliefs[(state, action, target_state)]
+            if success:
+                self._transition_beliefs[(state, action, target_state)] = (alpha + 1, beta)
+            else:
+                self._transition_beliefs[(state, action, target_state)] = (alpha, beta + 1)
+    
+
 cdef class Environment:
     """An Environment maintains the true state of the world.
     For example, it is the 2D gridworld, rendered by pygame.
