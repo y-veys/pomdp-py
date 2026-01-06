@@ -453,10 +453,11 @@ cdef class POUCT(Planner):
         target_state = self._agent.transition_model.sample(state=state, action=action)
         transition_beliefs = self._update_beliefs(transition_beliefs, state, action, target_state, success)
 
-        if (state, action, target_state) in transition_beliefs:
-            alpha, beta = transition_beliefs[(state, action, target_state)]
-            if self._debug:
+        if self._debug:
+            if (state, action, target_state) in transition_beliefs:
+                alpha, beta = transition_beliefs[(state, action, target_state)]
                 print(f"  [Depth {depth}] Updated belief: ({state}, {action}, {target_state}) -> Beta({alpha:.1f}, {beta:.1f})")
+                
         if nsteps == 0:
             # This indicates the provided action didn't lead to transition
             # Perhaps the action is not allowed to be performed for the given state
