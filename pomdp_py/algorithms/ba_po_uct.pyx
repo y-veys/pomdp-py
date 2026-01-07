@@ -281,7 +281,7 @@ cdef class POUCT(Planner):
 
         # Validate that agent has the required interface for BA-POUCT
         if not hasattr(agent, 'transition_beliefs'):
-            raise TypeError("BA-POUCT requires an agent with transition_beliefs() method. "
+            raise TypeError("BA-POUCT requires an agent with transition_beliefs property. "
                           "The agent must be a Bayes-Adaptive agent that maintains beliefs "
                           "over transition probabilities.")
 
@@ -365,7 +365,9 @@ cdef class POUCT(Planner):
         while not self._should_stop(sims_count, start_time):
             if self._debug:
                 print(f"\n--- Simulation {sims_count + 1} ---")
-            transition_beliefs = copy.deepcopy(self._agent.transition_beliefs())
+            # Shallow copy of dict keys, copy the values (alpha, beta tuples)
+            # This avoids issues with unpicklable keys like NodeSymbol
+            transition_beliefs = {key: value for key, value in self._agent.transition_beliefs.items()}
             if self._debug:
                 print(f"Initial beliefs: {transition_beliefs}")
             self._perform_simulation(state, transition_beliefs)
@@ -428,7 +430,7 @@ cdef class POUCT(Planner):
             if parent is not None:
                 parent[observation] = root
             self._expand_vnode(root, history, state=state)
-            
+
             if self._debug:
                 print(f"  [Depth {depth}] Starting rollout from {state}")
 
@@ -573,10 +575,12 @@ cdef class POUCT(Planner):
             alpha, beta = transition_beliefs[(state, action, target)]
             p_success = np.random.beta(alpha, beta)
             success = np.random.uniform() < p_success
+            
         else:
             # Not in transition_beliefs → deterministic transition (100% success)
             success = True
 
+        # success = True 
         if success:
             next_state = target
         else:
@@ -611,7 +615,8 @@ cdef class POUCT(Planner):
         cdef float alpha, beta
         cdef dict new_transition_beliefs
 
-        new_transition_beliefs = copy.deepcopy(transition_beliefs)
+        # Shallow copy of dict keys, copy the values (alpha, beta tuples)
+        new_transition_beliefs = {key: value for key, value in transition_beliefs.items()}
 
         # Only update if this transition is in beliefs (uncertain transitions)
         if (state, action, next_state) not in transition_beliefs:
