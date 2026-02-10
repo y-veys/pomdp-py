@@ -1,38 +1,20 @@
-# cython: profile=True
-# cython: linetrace=True
-"""This algorithm is PO-UCT (Partially Observable UCT). It is
-presented in the POMCP paper :cite:`silver2010monte` as an extension to the UCT
-algorithm :cite:`kocsis2006bandit` that combines MCTS and UCB1
-for action selection.
+"""BAMCP: Bayes-Adaptive Monte Carlo Planning with Root Sampling.
 
-In other words, this is just POMCP without particle belief,
-but arbitrary belief representation.
+This algorithm implements MCTS for Bayes-Adaptive MDPs (BAMDPs) using root sampling.
+At the start of each simulation, all transition probabilities are sampled from their
+Beta prior distributions. These sampled probabilities remain fixed throughout the
+entire simulation (both tree traversal and rollout phases).
 
-This planning strategy, based on MCTS with belief sampling may be referred to as
-"belief sparse sampling"; Partially Observable Sparse Sampling (POSS) is
-introduced in a recent paper :cite:`lim2019sparse` as an extension of sparse sampling
-for MDP by :cite:`kearns2002sparse`; It proposes an extension of POSS
-called POWSS (partially observable weighted sparse sampling).  However, this
-line of work (POSS, POWSS) is based solely on particle belief
-representation. POSS still requires comparing observations exactly for particle
-belief update, while POWSS uses weighted particles depending on the observation
-distribution.
+This is equivalent to sampling an MDP from the belief distribution, then running
+standard MCTS on that fixed MDP. The Q-values converge to the expected value over
+MDPs sampled from the prior.
 
-A note on the exploration constant. Quote from :cite:`gusmao2012towards`:
+Key difference from BA-POUCT:
+- BA-POUCT: Updates transition beliefs during simulation (path-dependent returns)
+- BAMCP: Samples all p_success once at root, no belief updates during simulation
 
-    "This constant should reflect the agent’s prior knowledge regarding
-    the amount of exploration required."
-
-In the POMCP paper, they set this constant following:
-
-    "The exploration constant for POMCP was set to :math:`c = R_{hi} - R_{lo}`,
-    where Rhi was the highest return achieved during sample runs of POMCP
-    with :math:`c = 0`, and Rlo was the lowest return achieved during sample rollouts"
-
-It is then clear that the POMCP paper is indeed setting this constant
-based on prior knowledge. Note the difference between `sample runs` and
-`sample rollouts`. But, this is certainly not the only way to obtainx1
-the prior knowledge.
+This approach reduces variance in Q-value estimates by ensuring that each simulation
+explores a consistent MDP rather than having beliefs change mid-simulation.
 """
 # cython: profile=True 
 
@@ -40,147 +22,28 @@ from pomdp_py.framework.basics cimport Action, Agent, POMDP, State, Observation,
     ObservationModel, TransitionModel, GenerativeDistribution, PolicyModel, TransitionBelief
 from pomdp_py.framework.planner cimport Planner
 from pomdp_py.representations.distribution.particles cimport Particles
-from pomdp_py.utils import typ
-import copy
+
+# Import shared tree node classes and rollout policy from ba_po_uct
+from pomdp_py.algorithms.ba_po_uct cimport TreeNode, QNode, VNode, RootVNode, \
+    ActionPrior, RolloutPolicy, RandomRollout, HeuristicFunction
+from pomdp_py.algorithms.ba_po_uct import TreeNode, QNode, VNode, RootVNode, \
+    ActionPrior, RolloutPolicy, RandomRollout, HeuristicFunction
+
 import time
 import random
 import math
-import numpy as np 
 from tqdm import tqdm
 
-cdef class TreeNode:
-    def __init__(self):
-        self.children = {}
-    def __getitem__(self, key):
-        return self.children.get(key, None)
-    def __setitem__(self, key, value):
-        self.children[key] = value
-    def __contains__(self, key):
-        return key in self.children
+cdef class BAMCP(Planner):
 
-cdef class QNode(TreeNode):
-    def __init__(self, num_visits, value):
-        """
-        `history_action`: a tuple ((a,o),(a,o),...(a,)). This is only
-            used for computing hashses
-        """
-        self.num_visits = num_visits
-        self.value = value
-        self.children = {}  # o -> VNode
-    def __str__(self):
-        return typ.red("QNode") + "(%.3f, %.3f | %s)" % (self.num_visits,
-                                                         self.value,
-                                                         str(self.children.keys()))
-    def __repr__(self):
-        return self.__str__()
+    """ BAMCP: Bayes-Adaptive Monte Carlo Planning with Root Sampling.
 
-cdef class VNode(TreeNode):
-    def __init__(self, num_visits, **kwargs):
-        self.num_visits = num_visits
-        self.children = {}  # a -> QNode
-    def __str__(self):
-        return typ.green("VNode") + "(%.3f, %.3f | %s)" % (self.num_visits,
-                                                           self.value,
-                                                           str(self.children.keys()))
-    def __repr__(self):
-        return self.__str__()
+    BAMCP implements MCTS for Bayes-Adaptive MDPs using root sampling:
+    - At each simulation, sample all transition probabilities from Beta priors
+    - Use these fixed probabilities throughout tree traversal and rollout
+    - No belief updates during simulation (unlike BA-POUCT)
 
-    def print_children_value(self):
-        for action in self.children:
-            print("   action %s: %.3f" % (str(action), self[action].value))
-
-    cpdef argmax(VNode self):
-        """argmax(VNode self)
-        Returns the action of the child with highest value"""
-        cdef Action action, best_action
-        cdef float best_value = float("-inf")
-        best_action = None
-        for action in self.children:
-            if self[action].value > best_value:
-                best_action = action
-                best_value = self[action].value
-        return best_action
-
-    @property
-    def value(self):
-        best_action = max(self.children, key=lambda action: self.children[action].value)
-        return self.children[best_action].value
-
-cdef class RootVNode(VNode):
-    def __init__(self, num_visits, history):
-        VNode.__init__(self, num_visits)
-        self.history = history
-    @classmethod
-    def from_vnode(cls, vnode, history):
-        """from_vnode(cls, vnode, history)"""
-        rootnode = RootVNode(vnode.num_visits, history)
-        rootnode.children = vnode.children
-        return rootnode
-
-cdef class ActionPrior:
-    """A problem-specific object"""
-
-    cpdef get_preferred_actions(ActionPrior self,
-                                State state,
-                                tuple history):
-        """
-        get_preferred_actions(cls, state, history, kwargs)
-        Intended as a classmethod.
-        This is to mimic the behavior of Simulator.Prior
-        and GenerateLegal/GeneratePreferred in David Silver's
-        POMCP code.
-
-        Returns a set of tuples, in the form of (action, num_visits_init, value_init)
-        that represent the preferred actions.
-        In POMCP, this acts as a history-based prior policy,
-        and in DESPOT, this acts as a belief-based prior policy.
-        For example, given certain state or history, only it
-        is possible that only a subset of all actions is legal;
-        This is useful when there is domain knowledge that can
-        be used as a heuristic for planning. """
-        raise NotImplementedError
-
-cdef class RolloutPolicy(PolicyModel):
-    cpdef Action rollout(self, State state, tuple history):
-        """rollout(self, State state, tuple history=None)"""
-        pass
-
-cdef class RandomRollout(RolloutPolicy):
-    """A rollout policy that chooses actions uniformly at random from the set of
-    possible actions."""
-    cpdef Action rollout(self, State state, tuple history):
-        """rollout(self, State state, tuple history=None)"""
-        return random.sample(self.get_all_actions(state=state, history=history), 1)[0]
-
-cdef class HeuristicFunction:
-    """A problem-specific heuristic function for estimating cost-to-go.
-
-    This is used to provide better value estimates when max depth is reached
-    during rollouts in POUCT. The heuristic should be admissible (never overestimate
-    the true cost-to-go) for best performance.
-    """
-
-    cpdef float value(self, State state):
-        """Compute the heuristic value (cost-to-go estimate) for the given state.
-
-        Args:
-            state: The state to evaluate
-
-        Returns:
-            float: Estimated discounted reward-to-go from this state.
-                   For cost problems, this should be negative (cost).
-                   For reward problems, this should be positive.
-        """
-        raise NotImplementedError
-
-
-cdef class POUCT(Planner):
-
-    """ POUCT (Partially Observable UCT) :cite:`silver2010monte` is presented in the POMCP
-    paper as an extension of the UCT algorithm to partially-observable domains
-    that combines MCTS and UCB1 for action selection.
-
-    POUCT only works for problems with action space that can be enumerated.
+    BAMCP only works for problems with action space that can be enumerated.
 
     __init__(self,
              max_depth=5, planning_time=1., num_sims=-1,
@@ -283,9 +146,9 @@ cdef class POUCT(Planner):
             raise ValueError("rollout_policy unset. Please call set_rollout_policy, "
                              "or pass in a rollout_policy upon initialization")
 
-        # Validate that agent has the required interface for BA-POUCT
+        # Validate that agent has the required interface for BA-BAMCP
         if not hasattr(agent, 'transition_beliefs'):
-            raise TypeError("BA-POUCT requires an agent with transition_beliefs property. "
+            raise TypeError("BA-BAMCP requires an agent with transition_beliefs property. "
                           "The agent must be a Bayes-Adaptive agent that maintains beliefs "
                           "over transition probabilities.")
 
@@ -315,7 +178,6 @@ cdef class POUCT(Planner):
             agent.tree = RootVNode.from_vnode(
                 agent.tree[real_action][real_observation],
                 agent.history)
-            print("Warning: The tree has been updated!")
         else:
             raise ValueError("Unexpected state; child should not be None")
 
@@ -375,7 +237,12 @@ cdef class POUCT(Planner):
             transition_beliefs = {key: value for key, value in self._agent.transition_beliefs.items()}
             if self._debug:
                 print(f"Initial beliefs: {transition_beliefs}")
-            self._perform_simulation(state, transition_beliefs)
+
+            # Lazy root sampling: initialize empty dict, sample on-demand in _sample_ba_transition
+            # This avoids sampling p_success for transitions we never visit
+            sampled_p_success = {}
+
+            self._perform_simulation(state, sampled_p_success)
             sims_count += 1
             self._update_progress(pbar, sims_count, start_time)
 
@@ -396,8 +263,8 @@ cdef class POUCT(Planner):
             total = self._num_sims if self._num_sims > 0 else self._planning_time
             return tqdm(total=total)
 
-    cpdef _perform_simulation(self, state, transition_beliefs):
-        self._simulate(state=state, history=self._agent.history, root=self._agent.tree, parent=None, observation=None, depth=0, transition_beliefs=transition_beliefs)
+    cpdef _perform_simulation(self, state, sampled_p_success):
+        self._simulate(state=state, history=self._agent.history, root=self._agent.tree, parent=None, observation=None, depth=0, sampled_p_success=sampled_p_success)
 
     cdef bint _should_stop(self, int sims_count, double start_time):
         cdef float time_taken = time.time() - start_time
@@ -415,15 +282,14 @@ cdef class POUCT(Planner):
         if self._show_progress:
             pbar.close()
 
-    cpdef _simulate(POUCT self,
+    cpdef _simulate(BAMCP self,
                     State state, tuple history, VNode root, QNode parent,
-                    Observation observation, int depth, dict transition_beliefs):
+                    Observation observation, int depth, dict sampled_p_success):
         if depth > self._max_depth:
             return 0
         if root is None:
             if self._debug: 
                 print(f"  [Depth {depth}] New node at state={state}, expanding...")
-                print(f"  [Depth {depth}] Transition beliefs at expansion: {transition_beliefs}")
 
             if self._agent.tree is None:
                 root = self._VNode(root=True)
@@ -439,7 +305,7 @@ cdef class POUCT(Planner):
             if self._debug:
                 print(f"  [Depth {depth}] Starting rollout from {state}")
 
-            rollout_reward = self._rollout(state, history, root, depth, transition_beliefs)
+            rollout_reward = self._rollout(state, history, root, depth, sampled_p_success)
 
             if self._debug:
                 print(f"  [Depth {depth}] Rollout returned reward: {rollout_reward:.2f}")
@@ -453,17 +319,11 @@ cdef class POUCT(Planner):
                 print(f"{a}={root[a].value:.2f}(n={root[a].num_visits}) ", end="")
             print()
 
-        next_state, observation, success, reward, nsteps = self._sample_ba_transition(state, action, transition_beliefs)
+        next_state, observation, success, reward, nsteps = self._sample_ba_transition(state, action, sampled_p_success)
         if self._debug:
             print(f"  [Depth {depth}] Transition: {state} --{action}--> {next_state} ({'success' if success else 'failure'}, r={reward:.1f})")
 
         target_state = self._agent.transition_model.sample(state=state, action=action)
-        transition_beliefs = self._update_beliefs(transition_beliefs, state, action, target_state, success)
-
-        if self._debug:
-            if (state, action, target_state) in transition_beliefs:
-                alpha, beta = transition_beliefs[(state, action, target_state)]
-                print(f"  [Depth {depth}] Updated belief: ({state}, {action}, {target_state}) -> Beta({alpha:.1f}, {beta:.1f})")
                 
         if nsteps == 0:
             # This indicates the provided action didn't lead to transition
@@ -478,7 +338,7 @@ cdef class POUCT(Planner):
                                                                                root[action],
                                                                                observation,
                                                                                depth+nsteps,
-                                                                               transition_beliefs)
+                                                                               sampled_p_success)
         root.num_visits += 1
         root[action].num_visits += 1
         old_value = root[action].value
@@ -487,7 +347,7 @@ cdef class POUCT(Planner):
             print(f"  [Depth {depth}] Backprop: Q({action}) = {old_value:.2f} -> {root[action].value:.2f} (n={root[action].num_visits}, R={total_reward:.2f})")
         return total_reward
 
-    cpdef _rollout(self, State state, tuple history, VNode root, int depth, dict transition_beliefs):
+    cpdef _rollout(self, State state, tuple history, VNode root, int depth, dict sampled_p_success):
         cdef Action action
         cdef float discount = 1.0
         cdef float total_discounted_reward = 0
@@ -497,21 +357,29 @@ cdef class POUCT(Planner):
         cdef int nsteps
         cdef float heuristic_value
 
+        cdef int rollout_step = 0
+
+        if self._debug:
+            print(f"    [Rollout] Starting from {state}, depth={depth}")
+
         while depth < self._max_depth:
             # Check if current state is terminal before sampling action
             if hasattr(self._agent.transition_model, 'is_terminal') and \
                self._agent.transition_model.is_terminal(state):
+                if self._debug:
+                    print(f"    [Rollout step {rollout_step}] Terminal state {state}, stopping")
                 break
 
             action = self._rollout_policy.rollout(state, history)
-            next_state, observation, success, reward, nsteps = self._sample_ba_transition(state, action, transition_beliefs)
+            next_state, observation, success, reward, nsteps = self._sample_ba_transition(state, action, sampled_p_success)
 
             target_state = self._agent.transition_model.sample(state=state, action=action)
-            transition_beliefs = self._update_beliefs(transition_beliefs, state, action, target_state, success)
 
             # Early termination if terminal state reached (nsteps == 0)
             if nsteps == 0:
                 total_discounted_reward += reward * discount
+                if self._debug:
+                    print(f"    [Rollout step {rollout_step}] nsteps=0, stopping. cumulative={total_discounted_reward:.2f}")
                 break
 
             history = history + ((action, observation),)
@@ -519,11 +387,18 @@ cdef class POUCT(Planner):
             total_discounted_reward += reward * discount
             discount *= (self._discount_factor**nsteps)
             state = next_state
+            rollout_step += 1
 
         # Add heuristic estimate if max depth reached and heuristic function provided
         if depth >= self._max_depth and self._heuristic_fn is not None:
             heuristic_value = self._heuristic_fn.value(state)
             total_discounted_reward += discount * heuristic_value
+            if self._debug:
+                print(f"    [Rollout] Max depth reached at {state}. Heuristic={heuristic_value:.2f}, "
+                      f"total={total_discounted_reward:.2f}")
+
+        if self._debug:
+            print(f"    [Rollout] Done. Total discounted reward={total_discounted_reward:.2f}")
 
         return total_discounted_reward
 
@@ -552,14 +427,15 @@ cdef class POUCT(Planner):
         else:
             return VNode(self._num_visits_init)
 
-    cpdef tuple _sample_ba_transition(self, State state, Action action, dict transition_beliefs):
+    cpdef tuple _sample_ba_transition(self, State state, Action action, dict sampled_p_success):
         """
         Sample a transition from the Bayes-Adaptive model.
 
         Args:
             state: Current state
             action: Action to take
-            transition_beliefs (dict): {(state, action, target_state) -> (alpha, beta)}
+            sampled_p_success (dict, optional): Pre-sampled p_success values from root sampling.
+                If provided, uses these instead of sampling from beliefs.
 
         Returns:
             tuple: (next_state, success, reward)
@@ -570,76 +446,34 @@ cdef class POUCT(Planner):
         cdef State target, next_state
         cdef float alpha, beta, p_success, reward
         cdef bint success
-        cdef TransitionBelief belief
 
         # The transition model for a BAMDP agent defines the target state
         # given a (state, action) pair IF the agent were to transition successfully.
         target = self._agent.transition_model.sample(state=state, action=action)
 
-        if (state, action, target) in transition_beliefs:
-            # Uncertain transition - sample from beliefs
-            belief = transition_beliefs[(state, action, target)]
-            alpha = belief.alpha
-            beta = belief.beta
-            # p_success = random.betavariate(alpha, beta)
-            p_success = alpha / (alpha + beta)
+        # Check if this transition has uncertain probability (in transition_beliefs)
+        if (state, action, target) in self._agent.transition_beliefs:
+            # Lazy root sampling: sample if not already sampled this simulation
+            if (state, action, target) not in sampled_p_success:
+                belief = self._agent.transition_beliefs[(state, action, target)]
+                sampled_p_success[(state, action, target)] = random.betavariate(belief.alpha, belief.beta)
+
+            p_success = sampled_p_success[(state, action, target)]
             success = random.random() < p_success
-            
+
+            if self._debug:
+                print(f"      [BA-Sample] ({state}, {action}, {target}): "
+                      f"p_success={p_success:.4f} -> {'SUCCESS' if success else 'FAILURE'}")
         else:
-            # Not in transition_beliefs → deterministic transition (100% success)
+            # Deterministic transition (not in transition_beliefs)
             success = True
 
-        # success = True 
         if success:
             next_state = target
         else:
-            next_state = state 
+            next_state = state
 
         observation = self._agent.observation_model.sample(next_state, action)
         reward = self._agent.reward_model.sample(state, action, next_state)
 
         return next_state, observation, success, reward, 1
-
-    cpdef dict _update_beliefs(self, dict transition_beliefs, State state, Action action, State next_state, bint success):
-        """
-        Update Beta beliefs based on observed transition outcome.
-
-        Beta posterior update rule (uses frontier-specific update strength c):
-        - If success (transitioned to target): (α, β) → (α+c, β)
-        - If failure (self-loop): (α, β) → (α, β+c)
-
-        The update strength c is stored in the TransitionBelief object:
-        - navigation frontiers: c >> 1 (e.g., 10.0) - failures are definitive
-        - manipulation frontiers: c ≈ 1 (e.g., 1.0) - failures are not definitive
-
-        Note: If (state, action, target_state) is not in beliefs (deterministic transition),
-        returns beliefs unchanged.
-
-        Args:
-            beliefs (dict): Current beliefs {(state, action, target_state) -> TransitionBelief}
-            state: The state we transitioned from
-            action: The action that was taken
-            next_state: The target state for this action
-            success (bool): True if transition succeeded, False if self-loop
-
-        Returns:
-            dict: New beliefs dictionary with updated TransitionBelief objects
-        """
-        cdef dict new_transition_beliefs
-        cdef TransitionBelief old_belief, new_belief
-
-        # Only update if this transition is in beliefs (uncertain transitions)
-        if (state, action, next_state) not in transition_beliefs:
-            return transition_beliefs
-
-        else: 
-            # Shallow copy of dict keys, deep copy the TransitionBelief values
-            new_transition_beliefs = {}
-            for key, belief in transition_beliefs.items():
-                new_transition_beliefs[key] = belief.copy()
-
-            old_belief = new_transition_beliefs[(state, action, next_state)]
-            new_belief = old_belief.update(success)
-            new_transition_beliefs[(state, action, next_state)] = new_belief
-
-            return new_transition_beliefs

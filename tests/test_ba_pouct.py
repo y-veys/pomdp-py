@@ -13,6 +13,7 @@ This tests a simple 2-state, 2-action BAMDP where:
 
 import numpy as np
 import pomdp_py
+from pomdp_py.framework.basics import TransitionBelief
 from pomdp_py.algorithms.ba_po_uct import POUCT, RandomRollout
 import pytest
 
@@ -234,6 +235,7 @@ class BayesAdaptiveAgent(pomdp_py.Agent):
                         observation_model, reward_model)
         self._transition_beliefs = transition_beliefs
 
+    @property
     def transition_beliefs(self):
         """Return current beliefs over transition probabilities."""
         return self._transition_beliefs
@@ -274,8 +276,10 @@ def create_test_bamdp():
     # Only uncertain transitions are in this dict
     # (start, right, goal) is deterministic (not in beliefs)
     # (start, left, goal) is uncertain with prior Beta(1, 1) = Uniform[0,1]
+    # Using navigation frontier type (strong updates with c=10.0)
     transition_beliefs = {
-        (SimpleState("start"), SimpleAction("left"), SimpleState("goal")): (1.0, 1.0)
+        (SimpleState("start"), SimpleAction("left"), SimpleState("goal")):
+            TransitionBelief(alpha=1.0, beta=1.0, frontier_type="navigation", update_strength=1.0)
     }
 
     # Create models
@@ -303,16 +307,16 @@ def test_agent_creation():
 
     assert agent is not None
     assert hasattr(agent, 'transition_beliefs')
-    assert len(agent.transition_beliefs()) == 1
+    assert len(agent.transition_beliefs) == 1
 
     # Check belief structure
     start = SimpleState("start")
     left = SimpleAction("left")
     goal = SimpleState("goal")
 
-    alpha, beta = agent.transition_beliefs()[(start, left, goal)]
-    assert alpha == 1.0
-    assert beta == 1.0
+    belief = agent.transition_beliefs[(start, left, goal)]
+    assert belief.alpha == 1.0
+    assert belief.beta == 1.0
     print("✓ Agent creation test passed")
 
 
@@ -502,10 +506,10 @@ def test_ba_pouct_belief_update():
     goal = SimpleState("goal")
 
     # Initial belief for (start, left, goal) is Beta(1, 1)
-    initial_beliefs = agent.transition_beliefs().copy()
-    alpha_init, beta_init = initial_beliefs[(start, left, goal)]
-    assert alpha_init == 1.0
-    assert beta_init == 1.0
+    initial_beliefs = agent.transition_beliefs.copy()
+    belief_init = initial_beliefs[(start, left, goal)]
+    assert belief_init.alpha == 1.0
+    assert belief_init.beta == 1.0
 
     # Test the _update_beliefs method from the planner
     planner = POUCT(
@@ -517,23 +521,23 @@ def test_ba_pouct_belief_update():
     )
 
     # Simulate a successful transition: (start, left) -> goal
-    # Beta update rule: success -> (α+1, β)
+    # Beta update rule: success -> (α+c, β) where c=1.0
     updated_beliefs_success = planner._update_beliefs(
         initial_beliefs, start, left, goal, success=True
     )
-    alpha_success, beta_success = updated_beliefs_success[(start, left, goal)]
-    assert alpha_success == 2.0, f"Expected alpha=2.0 after success, got {alpha_success}"
-    assert beta_success == 1.0, f"Expected beta=1.0 after success, got {beta_success}"
+    belief_success = updated_beliefs_success[(start, left, goal)]
+    assert belief_success.alpha == 2.0, f"Expected alpha=2.0 after success, got {belief_success.alpha}"
+    assert belief_success.beta == 1.0, f"Expected beta=1.0 after success, got {belief_success.beta}"
 
     # Simulate a failed transition: (start, left) -> start (self-loop)
-    # Beta update rule: failure -> (α, β+1)
+    # Beta update rule: failure -> (α, β+c) where c=1.0
     # The _update_beliefs method should be called with the TARGET state (goal)
     updated_beliefs_failure = planner._update_beliefs(
         initial_beliefs, start, left, goal, success=False
     )
-    alpha_failure, beta_failure = updated_beliefs_failure[(start, left, goal)]
-    assert alpha_failure == 1.0, f"Expected alpha=1.0 after failure, got {alpha_failure}"
-    assert beta_failure == 2.0, f"Expected beta=2.0 after failure, got {beta_failure}"
+    belief_failure = updated_beliefs_failure[(start, left, goal)]
+    assert belief_failure.alpha == 1.0, f"Expected alpha=1.0 after failure, got {belief_failure.alpha}"
+    assert belief_failure.beta == 2.0, f"Expected beta=2.0 after failure, got {belief_failure.beta}"
 
     # Verify deterministic transitions are not updated
     # (start, right, goal) is not in beliefs, so update should be no-op
@@ -545,8 +549,8 @@ def test_ba_pouct_belief_update():
     assert len(updated_beliefs_det) == 1
 
     print("✓ Belief update test passed")
-    print(f"  Success: Beta(1,1) -> Beta({alpha_success},{beta_success})")
-    print(f"  Failure: Beta(1,1) -> Beta({alpha_failure},{beta_failure})")
+    print(f"  Success: Beta(1,1) -> Beta({belief_success.alpha},{belief_success.beta})")
+    print(f"  Failure: Beta(1,1) -> Beta({belief_failure.alpha},{belief_failure.beta})")
 
 
 def test_ba_pouct_deterministic_action():
@@ -564,7 +568,7 @@ def test_ba_pouct_deterministic_action():
     right = SimpleAction("right")
     goal = SimpleState("goal")
 
-    assert (start, right, goal) not in agent.transition_beliefs()
+    assert (start, right, goal) not in agent.transition_beliefs
 
     planner = POUCT(
         max_depth=10,
@@ -684,8 +688,8 @@ def test_full_episode():
 
         if state.name == "start" and action.name == "left":
             # Uncertain transition
-            alpha, beta = agent.transition_beliefs()[(start, SimpleAction("left"), goal)]
-            p_success = np.random.beta(alpha, beta)
+            belief = agent.transition_beliefs[(start, SimpleAction("left"), goal)]
+            p_success = np.random.beta(belief.alpha, belief.beta)
             success = np.random.uniform() < p_success
             next_state = target if success else state
         else:

@@ -19,7 +19,8 @@ def build_extensions(pkg_name, major_submodules):
                 filename = os.path.splitext(f)[0]
                 ext_name = f"{pkg_name}.{subm}.{filename}"
                 ext_path = os.path.join(pkg_name, subm.replace(".", "/"), f)
-                extensions.append(Extension(ext_name, [ext_path]))
+                extensions.append(Extension(ext_name, [ext_path],
+                                            define_macros=[("CYTHON_TRACE", "1")]))
 
     return extensions
 
@@ -39,7 +40,7 @@ extensions = build_extensions(
 
 setup(
     ext_modules=cythonize(
-        extensions, build_dir="build", compiler_directives={"language_level": "3"}
+        extensions, build_dir="build", compiler_directives={"language_level": "3", "profile": True, "linetrace": True}
     ),
     packages=find_packages(exclude=["thirdparty", "thirdparty.*"]),
     package_data={
