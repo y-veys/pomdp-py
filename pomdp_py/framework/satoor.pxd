@@ -23,9 +23,9 @@ cdef class MDPObservation(Observation):
 cdef class MDPTransitionModel(TransitionModel):
     cdef public object mdp
     cdef public object goal_node_id
-    cdef dict _adjacency
-    cdef list _all_states
-    cdef dict _state_cache
+    cdef public dict _adjacency
+    cdef public list _all_states
+    cdef public dict _state_cache
 
 
 cdef class MDPRewardModel(RewardModel):
@@ -35,7 +35,7 @@ cdef class MDPRewardModel(RewardModel):
     cdef public object knowledge
     cdef public double navigation_failure_penalty
     cdef public double door_failure_penalty
-    cdef dict _reward_cache
+    cdef public dict _reward_cache
 
 
 cdef class MDPObservationModel(ObservationModel):
@@ -47,6 +47,13 @@ cdef class MDPHeuristic(HeuristicFunction):
     cdef public object goal_node_id
     cdef public object goal_position
     cdef dict _distance_cache
+
+
+cdef class MDPFallbackHeuristic(HeuristicFunction):
+    cdef public object goal_node_id
+    cdef public float _goal_reward
+    cdef public float _fallback_cost
+    cdef dict _cost_to_start
 
 
 cdef class MDPActionPrior(ActionPrior):

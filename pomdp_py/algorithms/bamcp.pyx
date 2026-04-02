@@ -286,6 +286,11 @@ cdef class BAMCP(Planner):
                     State state, tuple history, VNode root, QNode parent,
                     Observation observation, int depth, dict sampled_p_success):
         if depth > self._max_depth:
+            if self._heuristic_fn is not None:
+                hval = self._heuristic_fn.value(state)
+                if self._debug:
+                    print(f"  [Depth {depth}] Max depth exceeded at {state}. Heuristic={hval:.2f}")
+                return hval
             return 0
         if root is None:
             if self._debug: 

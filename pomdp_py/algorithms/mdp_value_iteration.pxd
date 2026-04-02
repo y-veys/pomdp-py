@@ -9,6 +9,7 @@ cdef class MDPValueIteration(Planner):
     cdef int _last_num_iterations
     cdef float _last_delta
     cdef dict _transition_cache
+    cdef bint _verbose
 
     cpdef _build_transition_cache(self, Agent agent)
     cpdef _compute_value_function(self, Agent agent)

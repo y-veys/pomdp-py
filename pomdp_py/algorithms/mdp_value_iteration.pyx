@@ -24,13 +24,15 @@ cdef class MDPValueIteration(Planner):
     Computes optimal value function V*(s) and derives greedy policy π*(s).
     """
 
-    def __init__(self, discount_factor=0.99, epsilon=1e-6, max_iterations=1000):
+    def __init__(self, discount_factor=0.99, epsilon=1e-6, max_iterations=1000,
+                 verbose=True):
         """Initialize MDP Value Iteration planner.
 
         Args:
             discount_factor: Discount factor γ (default: 0.99). Must be in [0, 1).
             epsilon: Convergence threshold (default: 1e-6). Stops when max|V_{k+1}(s) - V_k(s)| < ε.
             max_iterations: Maximum number of iterations (default: 1000). Safety limit.
+            verbose: Whether to print progress (default: True).
         """
         # Validate parameters
         if not (0 <= discount_factor < 1):
@@ -44,6 +46,7 @@ cdef class MDPValueIteration(Planner):
         self._discount_factor = discount_factor
         self._epsilon = epsilon
         self._max_iterations = max_iterations
+        self._verbose = verbose
 
         # Initialize value function as empty dict
         self._V = {}
@@ -103,7 +106,8 @@ cdef class MDPValueIteration(Planner):
         cdef list transitions
         cdef int total_transitions = 0
 
-        print("    Building sparse transition cache...")
+        if self._verbose:
+            print("    Building sparse transition cache...")
 
         states = list(agent.all_states)
         self._transition_cache = {}
@@ -130,7 +134,8 @@ cdef class MDPValueIteration(Planner):
                 if transitions:
                     self._transition_cache[(state, action)] = transitions
 
-        print(f"    Cached {total_transitions} non-zero transitions (avg {total_transitions / len(self._transition_cache):.1f} per (s,a))")
+        if self._verbose:
+            print(f"    Cached {total_transitions} non-zero transitions (avg {total_transitions / len(self._transition_cache):.1f} per (s,a))")
 
     cpdef _compute_value_function(self, Agent agent):
         """Compute optimal value function V*(s) via Bellman iteration.
@@ -225,11 +230,13 @@ cdef class MDPValueIteration(Planner):
             self._last_delta = max_delta
 
             # Print progress every iteration
-            print(f"    Iteration {iteration + 1}: max_delta={max_delta:.6f}")
+            if self._verbose:
+                print(f"    Iteration {iteration + 1}: max_delta={max_delta:.6f}")
 
             # Check convergence
             if max_delta < self._epsilon:
-                print(f"    Converged!")
+                if self._verbose:
+                    print(f"    Converged!")
                 break
 
     cpdef public plan(self, Agent agent):

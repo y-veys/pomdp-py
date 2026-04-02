@@ -133,6 +133,10 @@ cdef class MDPTransitionModel(TransitionModel):
             state_cache[node_id] = state
         return states, state_cache
 
+    def is_terminal(self, state):
+        """Check if state is terminal (goal)."""
+        return (<MDPState>state).node_id == self.goal_node_id
+
     def probability(self, next_state, state, action):
         """Return probability of transitioning to next_state."""
         cdef object state_node_id = (<MDPState>state).node_id
@@ -317,6 +321,31 @@ cdef class MDPHeuristic(HeuristicFunction):
         if (<MDPState>state).node_id == self.goal_node_id:
             return 0.0
         return -self._distance_cache.get((<MDPState>state).node_id, 0.0)
+
+
+cdef class MDPFallbackHeuristic(HeuristicFunction):
+    """Fallback heuristic: goal_reward - cost_back_to_current - fallback_cost.
+
+    Simulates the agent returning to the planning start node and taking a
+    known deterministic path of fixed cost (fallback_cost) to reach the goal.
+    Used to bound truncated rollouts in BAMCP.
+    """
+
+    def __init__(self, mdp_graph, start_node_id, goal_node_id,
+                 goal_reward=100.0, fallback_cost=10.0):
+        self.goal_node_id = goal_node_id
+        self._goal_reward = goal_reward
+        self._fallback_cost = fallback_cost
+        # Shortest path from start to all nodes (undirected graph)
+        import networkx as nx
+        lengths = nx.single_source_dijkstra_path_length(mdp_graph, start_node_id, weight="weight")
+        self._cost_to_start = dict(lengths)
+
+    cpdef float value(self, State state):
+        if (<MDPState>state).node_id == self.goal_node_id:
+            return 0.0
+        cost_back = self._cost_to_start.get((<MDPState>state).node_id, 0.0)
+        return self._goal_reward - cost_back - self._fallback_cost
 
 
 # ============================================================================
