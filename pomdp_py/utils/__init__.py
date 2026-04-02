@@ -21,3 +21,4 @@ from pomdp_py.utils.colors import (
 )
 from pomdp_py.utils import typ
 from pomdp_py.utils.debugging import TreeDebugger
+from pomdp_py.utils.visualize_tree import visualize_tree, save_tree

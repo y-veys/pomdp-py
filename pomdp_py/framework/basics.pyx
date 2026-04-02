@@ -479,6 +479,88 @@ cdef class Agent:
         return self.policy_model.get_all_actions(state=state, history=history)
 
 
+cdef class BayesAdaptiveAgent(Agent):
+    """
+    A Bayes-Adaptive Agent that extends the standard Agent class
+    with beliefs over transition probabilities.
+
+    For constrained BAMDPs, beliefs are represented as Beta distributions
+    over success probabilities: {(state, action, target_state) -> (alpha, beta)}
+
+    __init__(self, init_belief, beliefs,
+             policy_model=None,
+             transition_model=None,
+             observation_model=None,
+             reward_model=None,
+             blackbox_model=None,
+             name=None)
+
+    Args:
+        init_belief: Initial belief distribution over states
+        beliefs (dict): Beta beliefs over transitions {(s,a,s') -> (alpha, beta)}
+        Other args: Same as Agent class
+    """
+
+    def __init__(self, init_belief, transition_beliefs,
+                 policy_model=None,
+                 transition_model=None,
+                 observation_model=None,
+                 reward_model=None,
+                 blackbox_model=None,
+                 name=None,):
+        # Call parent constructor
+        Agent.__init__(self, init_belief, policy_model,
+                       transition_model, observation_model,
+                       reward_model, blackbox_model, name)
+
+        # Add Bayes-Adaptive specific attribute
+        self._transition_beliefs = transition_beliefs
+
+    @property
+    def transition_beliefs(self):
+        """
+        transition_beliefs(self)
+        Current Beta beliefs over transition probabilities.
+
+        Returns:
+            dict: {(state, action, target_state) -> (alpha, beta)}
+        """
+        return self._transition_beliefs
+
+    cpdef set_transition_beliefs(self, dict transition_beliefs):
+        """
+        set_transition_beliefs(self, dict beliefs)
+        Update the transition_beliefs dictionary.
+
+        Args:
+            transition_beliefs (dict): New beliefs {(s,a,s') -> (alpha, beta)}
+        """
+        self._transition_beliefs = transition_beliefs
+
+    cpdef update_transition_beliefs(self, State state, Action action,
+                                       State target_state, bint success):
+        """
+        update_transition_beliefs(self, state, action, target_state, success)
+        Perform Bayesian update on a single transition belief.
+
+        Beta posterior update:
+        - If success: (α, β) → (α+1, β)
+        - If failure: (α, β) → (α, β+1)
+
+        Args:
+            state: State we transitioned from
+            action: Action that was taken
+            target_state: Target state for this action
+            success (bool): Whether transition succeeded
+        """
+        if (state, action, target_state) in self._transition_beliefs:
+            alpha, beta = self._transition_beliefs[(state, action, target_state)]
+            if success:
+                self._transition_beliefs[(state, action, target_state)] = (alpha + 1, beta)
+            else:
+                self._transition_beliefs[(state, action, target_state)] = (alpha, beta + 1)
+    
+
 cdef class Environment:
     """An Environment maintains the true state of the world.
     For example, it is the 2D gridworld, rendered by pygame.
@@ -720,3 +802,95 @@ cpdef sample_explict_models(TransitionModel T, ObservationModel O, RewardModel R
         return next_state, observation, reward, nsteps
     else:
         return next_state, reward, nsteps
+
+
+# ============================================================================
+# Transition Belief (for Bayes-Adaptive Planning)
+# ============================================================================
+
+cdef class TransitionBelief:
+    """Represents a belief about an uncertain transition.
+    """
+
+    def __init__(self, float alpha=1.0, float beta=1.0,
+                 str frontier_type="navigation", float update_strength=1.0):
+        """Initialize a transition belief.
+
+        Args:
+            alpha: Beta distribution alpha parameter (default: 1.0 for uniform prior)
+            beta: Beta distribution beta parameter (default: 1.0 for uniform prior)
+            frontier_type: Type of frontier ("navigation" or "manipulation")
+            update_strength: Belief update strength c (default: 1.0)
+        """
+        self.alpha = alpha
+        self.beta = beta
+        self.frontier_type = frontier_type
+        self.update_strength = update_strength
+
+    @property
+    def expected_probability(self):
+        """Expected transition probability E[p] = α / (α + β)."""
+        return self.alpha / (self.alpha + self.beta)
+
+    cpdef TransitionBelief update(self, bint success):
+        """Update belief based on observed outcome.
+
+        Args:
+            success (bool): True if transition succeeded, False if failed
+
+        Returns:
+            TransitionBelief: New belief with updated parameters
+        """
+        cdef float new_alpha, new_beta
+
+        if success:
+            new_alpha = self.alpha + self.update_strength
+            new_beta = self.beta
+        else:
+            new_alpha = self.alpha
+            new_beta = self.beta + self.update_strength
+
+        return TransitionBelief(
+            alpha=new_alpha,
+            beta=new_beta,
+            frontier_type=self.frontier_type,
+            update_strength=self.update_strength
+        )
+
+    cpdef TransitionBelief copy(self):
+        """Create a deep copy of this belief."""
+        return TransitionBelief(
+            alpha=self.alpha,
+            beta=self.beta,
+            frontier_type=self.frontier_type,
+            update_strength=self.update_strength
+        )
+
+    def __repr__(self):
+        return (f"TransitionBelief(α={self.alpha:.1f}, β={self.beta:.1f}, "
+                f"type={self.frontier_type}, c={self.update_strength:.1f}, "
+                f"E[p]={self.expected_probability:.3f})")
+
+    def __str__(self):
+        return f"Beta({self.alpha:.1f}, {self.beta:.1f})"
+
+    cpdef tuple to_tuple(self):
+        """Convert to (alpha, beta) tuple for backward compatibility."""
+        return (self.alpha, self.beta)
+
+    @staticmethod
+    def from_tuple(tuple alpha_beta_tuple, str frontier_type="navigation",
+                   float update_strength=1.0):
+        """Create from (alpha, beta) tuple for backward compatibility.
+
+        Args:
+            alpha_beta_tuple: Tuple of (alpha, beta)
+            frontier_type: Type of frontier
+            update_strength: Belief update strength
+
+        Returns:
+            TransitionBelief
+        """
+        cdef float alpha, beta
+        alpha, beta = alpha_beta_tuple
+        return TransitionBelief(alpha, beta, frontier_type, update_strength)
